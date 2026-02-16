@@ -1,33 +1,36 @@
-import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as session from 'express-session';
-import * as cookieParser from 'cookie-parser';
-import helmet from 'helmet';
-import * as compression from 'compression';
-import { AppModule } from './app.module';
+import { NestFactory } from "@nestjs/core";
+import { ValidationPipe, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import * as session from "express-session";
+import * as cookieParser from "cookie-parser";
+import helmet from "helmet";
+import * as compression from "compression";
+import { AppModule } from "./app.module";
 
 async function bootstrap() {
-  const logger = new Logger('Bootstrap');
+  const logger = new Logger("Bootstrap");
 
   const app = await NestFactory.create(AppModule, {
-    logger: ['error', 'warn', 'log', 'debug', 'verbose'],
+    logger: ["error", "warn", "log", "debug", "verbose"],
   });
 
   const configService = app.get(ConfigService);
 
   // Get configuration
-  const port = configService.get<number>('app.port') || 3001;
-  const frontendUrl = configService.get<string>('app.frontendUrl');
-  const sessionSecret = configService.get<string>('session.secret') || 'fallback-secret';
-  const sessionName = configService.get<string>('session.name');
-  const sessionMaxAge = configService.get<number>('session.maxAge');
+  const port = configService.get<number>("app.port") || 3001;
+  const frontendUrl = configService.get<string>("app.frontendUrl");
+  const sessionSecret =
+    configService.get<string>("session.secret") || "fallback-secret";
+  const sessionName = configService.get<string>("session.name");
+  const sessionMaxAge = configService.get<number>("session.maxAge");
 
   // Security Headers
-  app.use(helmet({
-    contentSecurityPolicy: false, // Allow Socket.io
-    crossOriginEmbedderPolicy: false,
-  }));
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Allow Socket.io
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
 
   // Compression
   app.use(compression());
@@ -43,11 +46,12 @@ async function bootstrap() {
       resave: false,
       saveUninitialized: false,
       cookie: {
-        httpOnly: false, // MUST be false for WebSocket to read session cookie
-        secure: process.env.NODE_ENV === 'production', // HTTPS only in production
-        sameSite: 'lax',
+        httpOnly: false,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // ← Key change!
         maxAge: sessionMaxAge,
-        path: '/',
+        path: "/",
+        domain: process.env.NODE_ENV === "production" ? undefined : "localhost", // ← Important!
       },
       // TODO: Add Redis store for production
       // store: new RedisStore({ client: redisClient }),
@@ -58,9 +62,9 @@ async function bootstrap() {
   app.enableCors({
     origin: frontendUrl,
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
-    exposedHeaders: ['set-cookie'],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+    exposedHeaders: ["set-cookie"],
   });
 
   // Global Validation Pipe
@@ -76,7 +80,7 @@ async function bootstrap() {
   );
 
   // Global Prefix
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix("api");
 
   // Start Server
   await app.listen(port);
@@ -90,6 +94,6 @@ async function bootstrap() {
 }
 
 bootstrap().catch((error) => {
-  console.error('❌ Application failed to start:', error);
+  console.error("❌ Application failed to start:", error);
   process.exit(1);
 });
