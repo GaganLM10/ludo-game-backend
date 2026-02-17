@@ -46,12 +46,13 @@ async function bootstrap() {
       resave: false,
       saveUninitialized: false,
       cookie: {
-        httpOnly: false,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // ← Key change!
+        httpOnly: false, // Allow client-side access for debugging
+        secure: true, // Always use secure cookies in production (HTTPS required)
+        sameSite: "none", // Required for cross-domain cookies (Netlify <-> Render)
         maxAge: sessionMaxAge,
         path: "/",
-        domain: process.env.NODE_ENV === "production" ? undefined : "localhost", // ← Important!
+        // Don't set domain to allow cross-origin cookies to work
+        domain: undefined,
       },
       // TODO: Add Redis store for production
       // store: new RedisStore({ client: redisClient }),

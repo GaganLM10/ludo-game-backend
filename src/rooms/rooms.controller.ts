@@ -118,12 +118,17 @@ export class RoomsController {
    * Get current room
    */
   @Get("current")
-  @UseGuards(RoomSessionGuard)
   getCurrentRoom(@Session() session: ExpressSession & { roomCode?: string }) {
+    // Check if user has a session with a room
     if (!session.roomCode) {
-      throw new Error("No room found in session");
+      return {
+        success: false,
+        data: null,
+        message: 'No active room session'
+      };
     }
 
+    try {
     const room = this.roomsService.getRoom(session.roomCode);
     const player = this.roomsService.getPlayerBySessionId(session.id);
 
@@ -134,6 +139,14 @@ export class RoomsController {
         player,
       },
     };
+    } catch (error) {
+      this.logger.warn(`Failed to get room for session ${session.id}: ${error.message}`);
+      return {
+        success: false,
+        data: null,
+        message: 'Room not found or session expired'
+      };
+    }
   }
 
   /**
