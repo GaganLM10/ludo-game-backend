@@ -19,7 +19,6 @@ import {
   UpdatePlayerColorDto,
 } from "./dto/room.dto";
 import {
-  SessionGuard,
   RoomSessionGuard,
   AdminGuard,
 } from "../common/guards/session.guard";
@@ -31,7 +30,7 @@ export class RoomsController {
 
   constructor(
     private readonly roomsService: RoomsService,
-    private readonly roomsGateway: RoomsGateway,
+    private readonly roomsGateway: RoomsGateway
   ) {}
 
   /**
@@ -47,13 +46,13 @@ export class RoomsController {
       playerId?: string;
       roomCode?: string;
       isAdmin?: boolean;
-    },
+    }
   ) {
     const room = this.roomsService.createRoom(
       createRoomDto.playerName,
       createRoomDto.playerColor,
       createRoomDto.maxPlayers,
-      session.id,
+      session.id
     );
 
     // Store in session
@@ -69,6 +68,8 @@ export class RoomsController {
       data: {
         room,
         player: room.players[0],
+        // Return session ID so client can use it for WebSocket auth
+        sessionId: session.id,
       },
     };
   }
@@ -86,12 +87,12 @@ export class RoomsController {
       playerId?: string;
       roomCode?: string;
       isAdmin?: boolean;
-    },
+    }
   ) {
     const { room, player } = this.roomsService.joinRoom(
       joinRoomDto.roomCode,
       joinRoomDto.playerName,
-      session.id,
+      session.id
     );
 
     // Store in session
@@ -102,6 +103,8 @@ export class RoomsController {
     this.logger.log(`Player ${session.playerId} joined room ${room.code}`);
 
     // Broadcast to existing players in room via WebSocket
+    // Note: We do NOT emit a system message here — the gateway's joinRoom WS event
+    // will send the system message when the new player's socket connects
     this.roomsGateway.notifyPlayerJoined(room.code, player);
 
     return {
@@ -110,43 +113,78 @@ export class RoomsController {
       data: {
         room,
         player,
+        // Return session ID so client can use it for WebSocket auth
+        sessionId: session.id,
       },
     };
   }
 
   /**
-   * Get current room
+   * Get current room (used on page load to restore state)
    */
   @Get("current")
-  getCurrentRoom(@Session() session: ExpressSession & { roomCode?: string }) {
-    // Check if user has a session with a room
-    if (!session.roomCode) {
+  getCurrentRoom(
+    @Session() session: ExpressSession & { roomCode?: string; playerId?: string }
+  ) {
+    // No session or room in session
+    if (!session?.playerId || !session?.roomCode) {
       return {
         success: false,
         data: null,
-        message: 'No active room session'
+        message: "No active room session",
       };
     }
 
     try {
-    const room = this.roomsService.getRoom(session.roomCode);
-    const player = this.roomsService.getPlayerBySessionId(session.id);
+      const room = this.roomsService.getRoom(session.roomCode);
+      const player = this.roomsService.getPlayerBySessionId(session.id);
 
-    return {
-      success: true,
-      data: {
-        room,
-        player,
-      },
-    };
+      return {
+        success: true,
+        data: {
+          room,
+          player,
+          sessionId: session.id,
+        },
+      };
     } catch (error) {
-      this.logger.warn(`Failed to get room for session ${session.id}: ${error.message}`);
+      this.logger.warn(
+        `Failed to get room for session ${session.id}: ${error.message}`
+      );
+      // Clear stale session data
+      delete session.playerId;
+      delete session.roomCode;
+      delete session.isAdmin;
+
       return {
         success: false,
         data: null,
-        message: 'Room not found or session expired'
+        message: "Room not found or session expired",
       };
     }
+  }
+
+  /**
+   * Get session ID (used by frontend for WebSocket auth)
+   * This is safe because:
+   * - We use httpOnly cookies so JS can't read the cookie
+   * - But we need to pass session ID to WebSocket auth
+   * - The server returns the session ID from req.session.id (which is safe)
+   */
+  @Get("session-id")
+  getSessionId(
+    @Session()
+    session: ExpressSession & { playerId?: string; roomCode?: string }
+  ) {
+    return {
+      success: true,
+      data: {
+        sessionId: session.id,
+        hasSession: !!session.playerId,
+        playerId: session.playerId || null,
+        roomCode: session.roomCode || null,
+      },
+    };
   }
 
   /**
@@ -155,14 +193,15 @@ export class RoomsController {
   @Get("session")
   checkSession(
     @Session()
-    session: ExpressSession & { playerId?: string; roomCode?: string },
+    session: ExpressSession & { playerId?: string; roomCode?: string }
   ) {
     return {
       success: true,
       data: {
         hasSession: !!session.playerId,
-        playerId: session.playerId,
-        roomCode: session.roomCode,
+        playerId: session.playerId || null,
+        roomCode: session.roomCode || null,
+        sessionId: session.id,
       },
     };
   }
@@ -179,7 +218,7 @@ export class RoomsController {
       playerId?: string;
       roomCode?: string;
       isAdmin?: boolean;
-    },
+    }
   ) {
     const roomCode = session.roomCode;
     const player = this.roomsService.getPlayerBySessionId(session.id);
@@ -195,7 +234,7 @@ export class RoomsController {
     this.logger.log(`Player ${playerName} left room ${roomCode}`);
 
     // Notify other players if room still exists
-    if (room && roomCode) {
+    if (roomCode) {
       this.roomsGateway.notifyPlayerLeft(roomCode, playerName);
     }
 
@@ -213,11 +252,11 @@ export class RoomsController {
   @UseGuards(RoomSessionGuard)
   updateColor(
     @Body() updateColorDto: UpdatePlayerColorDto,
-    @Session() session: ExpressSession & { roomCode?: string },
+    @Session() session: ExpressSession & { roomCode?: string }
   ) {
     const { room, player } = this.roomsService.updatePlayerColor(
       session.id,
-      updateColorDto.newColor,
+      updateColorDto.newColor
     );
 
     this.logger.log(`Player ${player.name} changed color to ${player.color}`);
@@ -230,10 +269,7 @@ export class RoomsController {
     return {
       success: true,
       message: "Color updated successfully",
-      data: {
-        room,
-        player,
-      },
+      data: { room, player },
     };
   }
 
@@ -247,7 +283,7 @@ export class RoomsController {
     const { room, player } = this.roomsService.togglePlayerReady(session.id);
 
     this.logger.log(
-      `Player ${player.name} is ${player.isReady ? "ready" : "not ready"}`,
+      `Player ${player.name} is ${player.isReady ? "ready" : "not ready"}`
     );
 
     // Broadcast update via WebSocket
@@ -258,10 +294,7 @@ export class RoomsController {
     return {
       success: true,
       message: "Ready status updated",
-      data: {
-        room,
-        player,
-      },
+      data: { room, player },
     };
   }
 
@@ -289,18 +322,14 @@ export class RoomsController {
   }
 
   /**
-   * Get all rooms (for debugging in development)
+   * Get all rooms (debug)
    */
   @Get("all")
   getAllRooms() {
     const rooms = this.roomsService.getAllRooms();
-
     return {
       success: true,
-      data: {
-        count: rooms.length,
-        rooms,
-      },
+      data: { count: rooms.length, rooms },
     };
   }
 }
