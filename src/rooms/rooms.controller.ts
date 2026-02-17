@@ -124,7 +124,7 @@ export class RoomsController {
    */
   @Get("current")
   getCurrentRoom(
-    @Session() session: ExpressSession & { roomCode?: string; playerId?: string }
+    @Session() session: ExpressSession & { roomCode?: string; playerId?: string; isAdmin?: boolean }
   ) {
     // No session or room in session
     if (!session?.playerId || !session?.roomCode) {
