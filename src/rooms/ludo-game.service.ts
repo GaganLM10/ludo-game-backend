@@ -11,26 +11,60 @@ import {
 export class LudoGameService {
   private readonly logger = new Logger(LudoGameService.name);
 
-  /**
-   * Initialize game state when game starts
-   */
+  // ─── Board constants ───────────────────────────────────────────────────────
+  //
+  // Main ring: 52 squares, positions 0-51, clockwise.
+  //
+  // Start (home) squares — where a token lands when first unlocked by a 6:
+  //   Red   = 0   [6,1]
+  //   Green = 13  [1,8]
+  //   Yellow= 27  [8,13]
+  //   Blue  = 41  [13,6]
+  //
+  // Home-stretch entry — the LAST main-ring square BEFORE entering the colored lane.
+  // A token at this position, on the NEXT roll, enters the home stretch.
+  // (Gateway square itself is the final main-ring square, position N; 
+  //  the first stretch square is position 52 for every color.)
+  //   Red    gateway = 51  [8,1]   → stretch goes up col-7 rows 5→1
+  //   Green  gateway = 25  [7,14]  → stretch goes left row-7 cols 13→9
+  //   Yellow gateway = 39  [14,7]  → stretch goes up col-7 rows 13→9
+  //   Blue   gateway = 46  [8,6]   → stretch goes left row-7 cols 5→1
+  //
+  // Home stretch: positions 52-56 (5 squares of colored lane) + 57 = finished.
+  // Safe squares (cannot be captured): start squares + star squares (8 from each start).
+
+  private readonly START_POS: Record<PlayerColor, number> = {
+    [PlayerColor.RED]:    0,
+    [PlayerColor.GREEN]:  13,
+    [PlayerColor.YELLOW]: 27,
+    [PlayerColor.BLUE]:   41,
+  };
+
+  private readonly GATEWAY: Record<PlayerColor, number> = {
+    [PlayerColor.RED]:    51,
+    [PlayerColor.GREEN]:  25,
+    [PlayerColor.YELLOW]: 39,
+    [PlayerColor.BLUE]:   46,
+  };
+
+  private readonly SAFE_SQUARES = new Set([0, 8, 13, 21, 27, 35, 41, 49]);
+
+  // ─── Public API ────────────────────────────────────────────────────────────
+
   initializeGame(players: Player[]): GameState {
     const tokens: Token[] = [];
-
-    // Create 4 tokens for each player
     players.forEach((player) => {
       for (let i = 0; i < 4; i++) {
         tokens.push({
           id: `${player.color}-${i}`,
           color: player.color as PlayerColor,
-          position: -1, // All tokens start in home
+          position: -1,
           isInHome: true,
           isInHomeStretch: false,
           isFinished: false,
         });
       }
     });
-
     return {
       currentTurnPlayerIndex: 0,
       diceValue: null,
@@ -39,432 +73,231 @@ export class LudoGameService {
       tokens,
       winner: null,
       moveHistory: [],
+      playerColorOrder: players.map((p) => p.color as PlayerColor),
+      validMoves: [],
     };
   }
 
-  /**
-   * Roll dice for current player
-   */
   rollDice(gameState: GameState): { diceValue: number; gameState: GameState } {
     if (!gameState.canRollDice) {
       throw new BadRequestException("Cannot roll dice at this time");
     }
 
-    const diceValue = Math.floor(Math.random() * 6) + 1;
+    // After 2 consecutive sixes, force 1-5 on the third roll
+    let diceValue: number;
+    if (gameState.consecutiveSixes >= 2) {
+      diceValue = Math.floor(Math.random() * 5) + 1;
+      this.logger.log(`Forced non-six (consecutiveSixes=${gameState.consecutiveSixes}): ${diceValue}`);
+    } else {
+      diceValue = Math.floor(Math.random() * 6) + 1;
+    }
 
-    const newGameState = {
+    const currentPlayerColor = this.getCurrentPlayerColor(gameState);
+    const stateWithDice: GameState = {
       ...gameState,
       diceValue,
       canRollDice: false,
+      validMoves: [],
     };
 
-    // Check if player has any valid moves
-    const currentPlayerColor = this.getCurrentPlayerColor(
-      newGameState.currentTurnPlayerIndex,
-    );
-    const hasValidMoves = this.hasValidMoves(
-      newGameState,
-      currentPlayerColor,
-      diceValue,
-    );
+    const validMoves = this.computeValidMoves(stateWithDice, currentPlayerColor, diceValue);
 
-    if (!hasValidMoves) {
-      // No valid moves, pass turn
-      return this.passTurn(newGameState, diceValue);
+    if (validMoves.length === 0) {
+      this.logger.log(`No valid moves for ${currentPlayerColor} dice=${diceValue}, passing turn`);
+      return this.passTurn(stateWithDice, diceValue);
     }
 
-    return { diceValue, gameState: newGameState };
+    return { diceValue, gameState: { ...stateWithDice, validMoves } };
   }
 
-  /**
-   * Move a token
-   */
-  moveToken(
-    gameState: GameState,
-    tokenId: string,
-    currentPlayerIndex: number,
-  ): GameState {
+  moveToken(gameState: GameState, tokenId: string, _unused: number): GameState {
     if (gameState.diceValue === null) {
       throw new BadRequestException("Dice must be rolled first");
     }
 
     const token = gameState.tokens.find((t) => t.id === tokenId);
-    if (!token) {
-      throw new BadRequestException("Token not found");
-    }
+    if (!token) throw new BadRequestException("Token not found");
 
-    const currentPlayerColor = this.getCurrentPlayerColor(currentPlayerIndex);
+    const currentPlayerColor = this.getCurrentPlayerColor(gameState);
     if (token.color !== currentPlayerColor) {
       throw new BadRequestException("Can only move your own tokens");
     }
-
-    // Validate and execute move
-    const newPosition = this.calculateNewPosition(token, gameState.diceValue);
-    if (newPosition === null) {
-      throw new BadRequestException("Invalid move");
+    if (!gameState.validMoves.includes(tokenId)) {
+      throw new BadRequestException("This token is not a valid move");
     }
+
+    const newPosition = this.calculateNewPosition(token, gameState.diceValue);
+    if (newPosition === null) throw new BadRequestException("Invalid move");
 
     const updatedTokens = [...gameState.tokens];
     const tokenIndex = updatedTokens.findIndex((t) => t.id === tokenId);
     const oldPosition = updatedTokens[tokenIndex].position;
 
-    // Check for capture
+    // Check capture
     let capturedTokenId: string | undefined;
-    if (
-      newPosition >= 0 &&
-      newPosition <= 51 &&
-      !this.isSafeSquare(newPosition)
-    ) {
+    if (newPosition >= 0 && newPosition <= 51 && !this.SAFE_SQUARES.has(newPosition)) {
       const capturedToken = updatedTokens.find(
-        (t) =>
-          t.position === newPosition &&
-          t.color !== token.color &&
-          !t.isInHomeStretch &&
-          !t.isFinished,
+        (t) => t.position === newPosition && t.color !== token.color
+             && !t.isInHomeStretch && !t.isFinished && !t.isInHome,
       );
       if (capturedToken) {
-        const capturedIndex = updatedTokens.findIndex(
-          (t) => t.id === capturedToken.id,
-        );
-        updatedTokens[capturedIndex] = {
-          ...capturedToken,
-          position: -1,
-          isInHome: true,
-          isInHomeStretch: false,
-        };
+        const ci = updatedTokens.findIndex((t) => t.id === capturedToken.id);
+        updatedTokens[ci] = { ...capturedToken, position: -1, isInHome: true, isInHomeStretch: false };
         capturedTokenId = capturedToken.id;
       }
     }
 
-    // Update token position
+    // Apply move
     updatedTokens[tokenIndex] = {
       ...token,
       position: newPosition,
-      isInHome: newPosition === -1,
-      isInHomeStretch: newPosition >= 52 && newPosition < 58,
-      isFinished: newPosition === 58,
+      isInHome: false,
+      isInHomeStretch: newPosition >= 52 && newPosition <= 56,
+      isFinished: newPosition === 57,
     };
 
-    // Record move
-    const moveRecord: MoveRecord = {
-      playerColor: token.color,
-      tokenId: token.id,
-      from: oldPosition,
-      to: newPosition,
-      timestamp: new Date(),
-      capturedTokenId,
-    };
+    const moveHistory = [
+      ...gameState.moveHistory,
+      { playerColor: token.color, tokenId: token.id, from: oldPosition, to: newPosition,
+        timestamp: new Date(), capturedTokenId } as MoveRecord,
+    ];
 
-    const moveHistory = [...gameState.moveHistory, moveRecord];
-
-    // Check for winner
     const winner = this.checkWinner(updatedTokens);
-
-    // Determine next turn
-    const shouldContinueTurn =
-      gameState.diceValue === 6 || capturedTokenId !== undefined;
-    let nextGameState: GameState;
+    const rolledSix = gameState.diceValue === 6;
+    const didCapture = !!capturedTokenId;
+    const shouldContinueTurn = (rolledSix || didCapture) && !winner;
 
     if (shouldContinueTurn) {
-      // Player gets another turn
-      const consecutiveSixes =
-        gameState.diceValue === 6 ? gameState.consecutiveSixes + 1 : 0;
-
-      // If 3 consecutive sixes, pass turn
-      if (consecutiveSixes >= 3) {
-        nextGameState = this.passTurn(
-          {
-            ...gameState,
-            tokens: updatedTokens,
-            moveHistory,
-            winner,
-          },
+      const newConsecutiveSixes = rolledSix ? gameState.consecutiveSixes + 1 : 0;
+      if (newConsecutiveSixes >= 3) {
+        return this.passTurn(
+          { ...gameState, tokens: updatedTokens, moveHistory, winner, validMoves: [] },
           gameState.diceValue,
         ).gameState;
-      } else {
-        nextGameState = {
-          ...gameState,
-          tokens: updatedTokens,
-          diceValue: null,
-          canRollDice: true,
-          consecutiveSixes,
-          moveHistory,
-          winner,
-        };
       }
-    } else {
-      // Pass turn to next player
-      nextGameState = this.passTurn(
-        {
-          ...gameState,
-          tokens: updatedTokens,
-          moveHistory,
-          winner,
-        },
-        gameState.diceValue,
-      ).gameState;
+      return {
+        ...gameState,
+        tokens: updatedTokens,
+        diceValue: null,
+        canRollDice: true,
+        consecutiveSixes: newConsecutiveSixes,
+        moveHistory,
+        winner,
+        validMoves: [],
+      };
     }
 
-    return nextGameState;
+    return this.passTurn(
+      { ...gameState, tokens: updatedTokens, moveHistory, winner, validMoves: [] },
+      gameState.diceValue,
+    ).gameState;
+  }
+
+  getValidMoves(gameState: GameState, playerColor: PlayerColor): string[] {
+    if (!gameState.diceValue) return [];
+    return this.computeValidMoves(gameState, playerColor, gameState.diceValue);
+  }
+
+  // ─── Core movement logic ───────────────────────────────────────────────────
+
+  private computeValidMoves(gameState: GameState, playerColor: PlayerColor, diceValue: number): string[] {
+    return gameState.tokens
+      .filter((t) => t.color === playerColor && !t.isFinished)
+      .filter((t) => this.calculateNewPosition(t, diceValue) !== null)
+      .map((t) => t.id);
   }
 
   /**
-   * Calculate new position for token after dice roll
+   * Returns the new position for a token given a dice roll, or null if invalid.
+   *
+   * Positions:
+   *   -1         = home (not on board)
+   *   0  – 51    = main ring (clockwise)
+   *   52 – 56    = home stretch (colored lane, 5 squares)
+   *   57         = finished
    */
   private calculateNewPosition(token: Token, diceValue: number): number | null {
-    // Token in home - can only move out with a 6
+    // From home: only a 6 unlocks the token, placing it on the start square
     if (token.isInHome) {
-      if (diceValue === 6) {
-        return this.getStartPosition(token.color);
-      }
-      return null;
+      return diceValue === 6 ? this.START_POS[token.color as PlayerColor] : null;
     }
 
-    // Token finished - cannot move
-    if (token.isFinished) {
-      return null;
-    }
+    if (token.isFinished) return null;
 
-    // Token in home stretch
+    // In home stretch: move toward finish, exact count required
     if (token.isInHomeStretch) {
-      const newPos = token.position + diceValue;
-      if (newPos === 58) {
-        return 58; // Finished
-      } else if (newPos > 58) {
-        return null; // Overshoot - invalid move
-      }
-      return newPos;
+      const next = token.position + diceValue;
+      if (next === 57) return 57;          // exact finish
+      if (next > 57) return null;          // overshoot
+      return next;
     }
 
-    // Token on main board
-    let newPos = token.position + diceValue;
+    // On main ring
+    const gateway = this.GATEWAY[token.color as PlayerColor];
+    const stepsToGateway = this.stepsFromTo(token.position, gateway);
 
-    // Check if entering home stretch
-    const homeStretchEntry = this.getHomeStretchEntry(token.color);
-
-    // Calculate if we pass through home stretch entry
-    const start = token.position;
-    const end = newPos;
-
-    // Handle board wrapping (0-51)
-    if (end > 51) {
-      newPos = end - 52;
+    if (diceValue <= stepsToGateway) {
+      // Token does NOT reach or pass the gateway — stays on main ring
+      const rawNew = token.position + diceValue;
+      return rawNew > 51 ? rawNew - 52 : rawNew;
+    } else {
+      // Token reaches gateway and enters home stretch
+      const stepsIntoStretch = diceValue - stepsToGateway - 1;
+      // stepsToGateway steps lands on gateway; then 1 more step enters stretch pos 52,
+      // further steps go to 53, 54, 55, 56
+      const stretchPos = 52 + stepsIntoStretch;
+      if (stretchPos > 56) return null;   // overshoot
+      return stretchPos;
     }
-
-    // Check if we passed home stretch entry
-    if (
-      this.passedHomeStretchEntry(
-        start,
-        diceValue,
-        homeStretchEntry,
-        token.color,
-      )
-    ) {
-      // Enter home stretch
-      const stepsIntoHomeStretch = this.calculateHomeStretchSteps(
-        start,
-        diceValue,
-        homeStretchEntry,
-      );
-      return 52 + stepsIntoHomeStretch - 1;
-    }
-
-    return newPos;
   }
 
   /**
-   * Check if move passes through home stretch entry
+   * How many steps does it take to move FROM `from` TO `to` going clockwise?
+   * Both positions are on the main ring (0-51).
    */
-  private passedHomeStretchEntry(
-    currentPos: number,
-    diceValue: number,
-    homeStretchEntry: number,
-    color: PlayerColor,
-  ): boolean {
-    const endPos = currentPos + diceValue;
-
-    // Check if we're at or passed the entry point
-    if (currentPos <= homeStretchEntry && endPos >= homeStretchEntry) {
-      return true;
-    }
-
-    // Handle wrapping around board
-    if (currentPos <= homeStretchEntry && endPos > 51) {
-      const wrapped = endPos - 52;
-      return wrapped >= 0;
-    }
-
-    return false;
+  private stepsFromTo(from: number, to: number): number {
+    if (to >= from) return to - from;
+    return 52 - from + to; // wrap around
   }
 
-  /**
-   * Calculate steps into home stretch
-   */
-  private calculateHomeStretchSteps(
-    currentPos: number,
-    diceValue: number,
-    homeStretchEntry: number,
-  ): number {
-    if (currentPos <= homeStretchEntry) {
-      return diceValue - (homeStretchEntry - currentPos);
-    }
-    // Wrapped around
-    return diceValue - (52 - currentPos + homeStretchEntry);
-  }
-
-  /**
-   * Get starting position for each color
-   */
-  private getStartPosition(color: PlayerColor): number {
-    const starts = {
-      red: 1, // 2nd square from red home
-      green: 14, // 2nd square from green home
-      yellow: 27, // 2nd square from yellow home
-      blue: 40, // 2nd square from blue home
-    };
-    return starts[color];
-  }
-
-  /**
-   * Get home stretch entry position for each color
-   */
-  private getHomeStretchEntry(color: PlayerColor): number {
-    const entries = {
-      red: 51, // Entry to red home stretch
-      green: 12, // Entry to green home stretch
-      yellow: 25, // Entry to yellow home stretch
-      blue: 38, // Entry to blue home stretch
-    };
-    return entries[color];
-  }
-
-  /**
-   * Check if position is a safe square
-   */
-  private isSafeSquare(position: number): boolean {
-    // Safe squares: start positions and star positions
-    const safeSquares = [
-      1,
-      9,
-      14,
-      22,
-      27,
-      35,
-      40,
-      48, // Star squares (8 from each home)
-    ];
-    return safeSquares.includes(position);
-  }
-
-  /**
-   * Check if player has valid moves
-   */
-  private hasValidMoves(
-    gameState: GameState,
-    playerColor: PlayerColor,
-    diceValue: number,
-  ): boolean {
-    const playerTokens = gameState.tokens.filter(
-      (t) => t.color === playerColor,
-    );
-
-    for (const token of playerTokens) {
-      const newPos = this.calculateNewPosition(token, diceValue);
-      if (newPos !== null) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Pass turn to next player
-   */
-  private passTurn(
-    gameState: GameState,
-    lastDiceValue: number,
-  ): { diceValue: number; gameState: GameState } {
-    const nextPlayerIndex =
-      (gameState.currentTurnPlayerIndex + 1) % this.getPlayerCount(gameState);
-
+  private passTurn(gameState: GameState, lastDiceValue: number): { diceValue: number; gameState: GameState } {
+    const playerCount = gameState.playerColorOrder?.length ?? this.getPlayerCount(gameState);
+    const nextIndex = (gameState.currentTurnPlayerIndex + 1) % playerCount;
     return {
       diceValue: lastDiceValue,
       gameState: {
         ...gameState,
-        currentTurnPlayerIndex: nextPlayerIndex,
+        currentTurnPlayerIndex: nextIndex,
         diceValue: null,
         canRollDice: true,
         consecutiveSixes: 0,
+        validMoves: [],
       },
     };
   }
 
-  /**
-   * Get current player color
-   */
-  private getCurrentPlayerColor(playerIndex: number): PlayerColor {
-    const colors = [
-      PlayerColor.RED,
-      PlayerColor.GREEN,
-      PlayerColor.YELLOW,
-      PlayerColor.BLUE,
+  private getCurrentPlayerColor(gameState: GameState): PlayerColor {
+    if (gameState.playerColorOrder?.length > 0) {
+      return gameState.playerColorOrder[gameState.currentTurnPlayerIndex];
+    }
+    return [PlayerColor.RED, PlayerColor.GREEN, PlayerColor.YELLOW, PlayerColor.BLUE][
+      gameState.currentTurnPlayerIndex
     ];
-    return colors[playerIndex];
   }
 
-  /**
-   * Get player count from game state
-   */
   private getPlayerCount(gameState: GameState): number {
-    const uniqueColors = new Set(gameState.tokens.map((t) => t.color));
-    return uniqueColors.size;
+    return new Set(gameState.tokens.map((t) => t.color)).size;
   }
 
-  /**
-   * Check if a player has won
-   */
   private checkWinner(tokens: Token[]): PlayerColor | null {
-    const colorGroups = tokens.reduce(
-      (acc, token) => {
-        if (!acc[token.color]) {
-          acc[token.color] = [];
-        }
-        acc[token.color].push(token);
-        return acc;
-      },
-      {} as Record<PlayerColor, Token[]>,
-    );
-
-    for (const [color, colorTokens] of Object.entries(colorGroups)) {
-      if (colorTokens.every((t) => t.isFinished)) {
-        return color as PlayerColor;
-      }
+    const byColor: Record<string, Token[]> = {};
+    tokens.forEach((t) => {
+      if (!byColor[t.color]) byColor[t.color] = [];
+      byColor[t.color].push(t);
+    });
+    for (const [color, ct] of Object.entries(byColor)) {
+      if (ct.every((t) => t.isFinished)) return color as PlayerColor;
     }
-
     return null;
-  }
-
-  /**
-   * Get valid moves for current player
-   */
-  getValidMoves(gameState: GameState, playerColor: PlayerColor): string[] {
-    if (!gameState.diceValue) {
-      return [];
-    }
-
-    const validTokenIds: string[] = [];
-    const playerTokens = gameState.tokens.filter(
-      (t) => t.color === playerColor,
-    );
-
-    for (const token of playerTokens) {
-      const newPos = this.calculateNewPosition(token, gameState.diceValue);
-      if (newPos !== null) {
-        validTokenIds.push(token.id);
-      }
-    }
-
-    return validTokenIds;
   }
 }

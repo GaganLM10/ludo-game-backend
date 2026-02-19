@@ -1,8 +1,8 @@
 export enum PlayerColor {
-  RED = 'red',
-  BLUE = 'blue',
-  GREEN = 'green',
-  YELLOW = 'yellow',
+  RED = "red",
+  BLUE = "blue",
+  GREEN = "green",
+  YELLOW = "yellow",
 }
 
 export class Player {
@@ -16,9 +16,9 @@ export class Player {
 }
 
 export enum RoomStatus {
-  WAITING = 'waiting',
-  PLAYING = 'playing',
-  FINISHED = 'finished',
+  WAITING = "waiting",
+  PLAYING = "playing",
+  FINISHED = "finished",
 }
 
 // Ludo game specific entities
@@ -39,6 +39,9 @@ export interface GameState {
   tokens: Token[]; // All tokens for all players
   winner: PlayerColor | null;
   moveHistory: MoveRecord[];
+  playerColorOrder: PlayerColor[];
+  // Always up-to-date valid move token IDs for the current player after dice roll
+  validMoves: string[];
 }
 
 export interface MoveRecord {
